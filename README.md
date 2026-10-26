@@ -35,6 +35,28 @@ PUBLIC_BASE_URL=http://SERVER_IP:8080
 docker compose up -d --build
 ```
 
+### اگر یوتیوب درخواست ورود کرد
+
+ایمیج Docker شامل Deno و بستهٔ `yt-dlp-ejs` است که برای چالش‌های JavaScript یوتیوب لازم‌اند. با این حال، یوتیوب ممکن است IP سرور را به تأیید ورود وادار کند. در آن صورت، یک فایل کوکی با قالب Netscape/Mozilla از نشست یوتیوب خود صادر کن و روی سرور در `secrets/youtube-cookies.txt` قرار بده. [راهنمای رسمی yt-dlp برای کوکی‌های یوتیوب](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies) را برای روش صدور و نکات مربوط به نشست بخوان. استفاده از کوکی حساب ممکن است باعث محدودیت یا مسدود شدن حساب شود؛ فقط در صورت نیاز از آن استفاده کن.
+
+```bash
+mkdir -p secrets
+# فایل کوکی صادرشده را به secrets/youtube-cookies.txt منتقل کن
+chmod 600 secrets/youtube-cookies.txt
+```
+
+سپس این خط را به `.env` اضافه کن و سرویس را دوباره بساز:
+
+```dotenv
+YT_DLP_COOKIES_FILE=/run/secrets/youtube-cookies.txt
+```
+
+```bash
+docker compose up -d --build
+```
+
+فایل `secrets/` داخل ایمیج Docker کپی نمی‌شود و در git هم نادیده گرفته می‌شود؛ Compose آن را فقط برای خواندن در کانتینر قرار می‌دهد. ربات برای استفادهٔ yt-dlp یک کپی موقت می‌سازد و پس از هر درخواست پاک می‌کند. فایل کوکی را به کسی نفرست و در مخزن ثبت نکن. کوکی‌های منقضی‌شده باید دوباره صادر شوند. اگر چالش حتی با کوکی تازه ادامه داشت، ممکن است IP سرور از طرف یوتیوب محدود شده باشد.
+
 لاگ‌ها:
 
 ```bash
@@ -90,6 +112,7 @@ python bot.py
 | `MAX_CONCURRENT_JOBS` | تعداد پردازش هم‌زمان مجاز | `1` |
 | `PUBLIC_BASE_URL` | آدرسی که وب‌سرور فایل‌ها (`files`/nginx) از بیرون در دسترس است؛ لینک‌های ارسالی با همین پیشوند ساخته می‌شوند | *(باید تنظیم شود)* |
 | `FILE_RETENTION_HOURS` | چند ساعت بعد از ساخت، فایل‌های داخل `public/` پاک شوند | `24` |
+| `YT_DLP_COOKIES_FILE` | مسیر فایل کوکی در قالب Netscape/Mozilla؛ در Docker از `/run/secrets/youtube-cookies.txt` استفاده کن | *(خالی؛ بدون کوکی)* |
 
 ## محدودیت‌ها و نکات
 

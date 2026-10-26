@@ -3,6 +3,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 
+from yt_dlp.utils import DownloadError
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -20,6 +21,7 @@ from subtitles import transcribe, translate_to_persian, write_srt
 from utils import extract_youtube_url
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_JOBS)
@@ -83,9 +85,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except VideoTooLongError as e:
         await status_message.edit_text(str(e))
         return
-    except Exception as e:
+    except DownloadError as e:
+        logger.warning("video download failed: %s", e)
+        if "sign in to confirm" in str(e).lower():
+            await status_message.edit_text(
+                "یوتیوب از سرور درخواست تأیید ورود کرده است. مدیر ربات باید فایل کوکی یوتیوب را تنظیم کند و دوباره تلاش کنید."
+            )
+        else:
+            await status_message.edit_text("دانلود ویدیو از یوتیوب ناموفق بود. لطفاً بعداً دوباره تلاش کنید.")
+        return
+    except Exception:
         logger.exception("processing failed")
-        await status_message.edit_text(f"خطا در پردازش ویدیو: {e}")
+        await status_message.edit_text("خطا در پردازش ویدیو. لطفاً به مدیر ربات اطلاع دهید.")
         return
 
     size_mb = os.path.getsize(output_path) / (1024 * 1024)

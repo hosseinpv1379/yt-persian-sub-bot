@@ -1,5 +1,5 @@
 python-telegram-bot[job-queue]==21.6
-yt-dlp>=2024.8.6
+yt-dlp[default]>=2025.11.12
 faster-whisper>=1.0.3
 deep-translator>=1.11.4
 srt>=3.5.3

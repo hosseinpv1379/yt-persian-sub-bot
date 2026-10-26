@@ -1,4 +1,8 @@
+FROM denoland/deno:bin-2.9.8 AS deno
+
 FROM python:3.11-slim
+
+COPY --from=deno /deno /usr/local/bin/deno
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
@@ -18,6 +22,8 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+RUN deno --version
 
 COPY . .
 

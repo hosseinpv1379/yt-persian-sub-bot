@@ -1,17 +1,37 @@
 import os
+import shutil
+import tempfile
 import uuid
+from contextlib import contextmanager
 
 import yt_dlp
 
-from config import MAX_VIDEO_HEIGHT, MAX_VIDEO_MINUTES, WORK_DIR
+from config import MAX_VIDEO_HEIGHT, MAX_VIDEO_MINUTES, WORK_DIR, YT_DLP_COOKIES_FILE
 
 
 class VideoTooLongError(Exception):
     pass
 
 
+@contextmanager
+def _youtube_dl(options: dict):
+    options = {"quiet": True, "noplaylist": True, **options}
+    # yt-dlp saves its cookie jar on close, so keep the mounted source read-only.
+    with tempfile.TemporaryDirectory() as temp_dir:
+        if YT_DLP_COOKIES_FILE:
+            if not os.path.isfile(YT_DLP_COOKIES_FILE):
+                raise FileNotFoundError(
+                    f"YT_DLP_COOKIES_FILE is set, but the file is missing: {YT_DLP_COOKIES_FILE}"
+                )
+            cookie_copy = os.path.join(temp_dir, "cookies.txt")
+            shutil.copyfile(YT_DLP_COOKIES_FILE, cookie_copy)
+            options["cookiefile"] = cookie_copy
+        with yt_dlp.YoutubeDL(options) as ydl:
+            yield ydl
+
+
 def probe_duration(url: str) -> float:
-    with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True}) as ydl:
+    with _youtube_dl({}) as ydl:
         info = ydl.extract_info(url, download=False)
     return info.get("duration") or 0
 
@@ -31,10 +51,8 @@ def download_video(url: str) -> str:
         "format": f"bestvideo[height<={MAX_VIDEO_HEIGHT}]+bestaudio/best[height<={MAX_VIDEO_HEIGHT}]",
         "merge_output_format": "mp4",
         "outtmpl": out_template,
-        "quiet": True,
-        "noplaylist": True,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with _youtube_dl(ydl_opts) as ydl:
         ydl.download([url])
 
     final_path = os.path.join(WORK_DIR, f"{job_id}.mp4")

@@ -16,3 +16,4 @@ WORK_DIR = os.environ.get("WORK_DIR", os.path.join(os.path.dirname(__file__), "d
 PUBLIC_DIR = os.environ.get("PUBLIC_DIR", os.path.join(os.path.dirname(__file__), "public"))
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 FILE_RETENTION_HOURS = float(os.environ.get("FILE_RETENTION_HOURS", "24"))
+YT_DLP_COOKIES_FILE = os.environ.get("YT_DLP_COOKIES_FILE", "")
