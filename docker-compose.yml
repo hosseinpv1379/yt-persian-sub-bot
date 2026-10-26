@@ -1,0 +1,21 @@
+services:
+  bot:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - ./downloads:/app/downloads
+      - ./public:/app/public
+      - whisper-cache:/root/.cache
+    restart: unless-stopped
+
+  files:
+    image: nginx:alpine
+    volumes:
+      - ./public:/usr/share/nginx/html:ro
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  whisper-cache:
