@@ -16,6 +16,7 @@ from config import (
     PUBLIC_BASE_URL,
     PUBLIC_DIR,
     WORK_DIR,
+    YT_DLP_COOKIES_FILE,
 )
 from downloader import VideoTooLongError, download_video
 from subtitles import transcribe, translate_to_persian, write_srt
@@ -110,9 +111,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     except DownloadError as e:
         logger.warning("video download failed: %s", e)
-        if "sign in to confirm" in str(e).lower():
+        error_text = str(e).lower()
+        if "sign in to confirm" in error_text or "not a bot" in error_text:
+            if YT_DLP_COOKIES_FILE and os.path.isfile(YT_DLP_COOKIES_FILE):
+                cookie_help = (
+                    "فایل کوکی تنظیم شده، اما یوتیوب آن را نپذیرفت یا منقضی شده است. "
+                    "مدیر ربات باید کوکی تازهٔ YouTube با قالب Netscape را جایگزین کند و سرویس را راه‌اندازی مجدد کند."
+                )
+            else:
+                cookie_help = (
+                    "مدیر ربات باید کوکی YouTube با قالب Netscape را در "
+                    "secrets/youtube-cookies.txt قرار دهد، مقدار "
+                    "YT_DLP_COOKIES_FILE=/run/secrets/youtube-cookies.txt را در .env تنظیم کند "
+                    "و سرویس را دوباره راه‌اندازی کند."
+                )
             await status_message.edit_text(
-                "یوتیوب از سرور درخواست تأیید ورود کرده است. مدیر ربات باید فایل کوکی یوتیوب را تنظیم کند و دوباره تلاش کنید."
+                "یوتیوب درخواست تأیید ضدربات داده و دانلود را رد کرده است.\n\n"
+                f"{cookie_help}\n\n"
+                "اگر کوکی تازه هم رد شد، احتمال دارد IP سرور محدود شده باشد."
             )
         else:
             await status_message.edit_text("دانلود ویدیو از یوتیوب ناموفق بود. لطفاً بعداً دوباره تلاش کنید.")
