@@ -1,12 +1,23 @@
 import datetime
+import threading
+import time
 
 import srt
 from deep_translator import GoogleTranslator
+from deep_translator.exceptions import TooManyRequests
 from faster_whisper import WhisperModel
 
 from config import WHISPER_COMPUTE_TYPE, WHISPER_DEVICE, WHISPER_MODEL_SIZE
 
 _model = None
+_translation_lock = threading.Lock()
+_last_translation_request = 0.0
+_MIN_TRANSLATION_INTERVAL = 0.5
+_RATE_LIMIT_RETRY_DELAYS = (2, 4, 8, 16, 30)
+
+
+class TranslationRateLimitError(RuntimeError):
+    pass
 
 
 def _get_model():
@@ -23,13 +34,30 @@ def transcribe(video_path: str):
 
 
 def translate_to_persian(segments):
+    global _last_translation_request
+
     translator = GoogleTranslator(source="auto", target="fa")
     translated = []
     for start, end, text in segments:
-        try:
-            fa_text = translator.translate(text)
-        except Exception as exc:
-            raise RuntimeError("ترجمهٔ زیرنویس انجام نشد؛ سرویس ترجمه را بررسی کنید.") from exc
+        fa_text = None
+        with _translation_lock:
+            for attempt in range(len(_RATE_LIMIT_RETRY_DELAYS) + 1):
+                wait = _MIN_TRANSLATION_INTERVAL - (time.monotonic() - _last_translation_request)
+                if wait > 0:
+                    time.sleep(wait)
+                try:
+                    fa_text = translator.translate(text)
+                    _last_translation_request = time.monotonic()
+                    break
+                except TooManyRequests as exc:
+                    _last_translation_request = time.monotonic()
+                    if attempt == len(_RATE_LIMIT_RETRY_DELAYS):
+                        raise TranslationRateLimitError(
+                            "ترجمه پس از چند تلاش هنوز با محدودیت نرخ مواجه است؛ کمی بعد دوباره تلاش کنید."
+                        ) from exc
+                    time.sleep(_RATE_LIMIT_RETRY_DELAYS[attempt])
+                except Exception as exc:
+                    raise RuntimeError("ترجمهٔ زیرنویس انجام نشد؛ سرویس ترجمه را بررسی کنید.") from exc
         if not fa_text:
             raise RuntimeError("سرویس ترجمه برای بخشی از زیرنویس پاسخ خالی داد.")
         translated.append((start, end, fa_text))

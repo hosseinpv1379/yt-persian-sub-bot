@@ -19,7 +19,7 @@ from config import (
     YT_DLP_COOKIES_FILE,
 )
 from downloader import VideoTooLongError, download_video
-from subtitles import transcribe, translate_to_persian, write_srt
+from subtitles import TranslationRateLimitError, transcribe, translate_to_persian, write_srt
 from utils import extract_youtube_url
 
 logging.basicConfig(level=logging.INFO)
@@ -104,6 +104,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         output_path = await loop.run_in_executor(executor, _process, url, status_cb)
     except VideoTooLongError as e:
         await status_message.edit_text(str(e))
+        return
+    except TranslationRateLimitError as e:
+        logger.warning("translation service rate-limited the request: %s", e)
+        await status_message.edit_text(
+            "سرویس ترجمهٔ گوگل موقتاً درخواست‌ها را محدود کرده است. کمی بعد دوباره لینک را بفرستید."
+        )
         return
     except FileNotFoundError as e:
         logger.error("required file is unavailable: %s", e)
