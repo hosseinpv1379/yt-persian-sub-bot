@@ -108,7 +108,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except DownloadError as e:
         logger.warning("video download failed: %s", e)
         error_text = str(e).lower()
-        if "sign in to confirm" in error_text or "not a bot" in error_text:
+        if "unable to download video subtitles" in error_text and "429" in error_text:
+            await status_message.edit_text(
+                "YouTube دانلود زیرنویس ترجمه‌شدهٔ فارسی را موقتاً با خطای 429 رد کرد. "
+                "مدیر ربات باید کوکی تازه‌ای از نشست YouTube صادر کند که در آن زیرنویس خودکار و ترجمه به فارسی "
+                "برای یک ویدیو باز شده باشد؛ سپس سرویس را دوباره راه‌اندازی کند."
+            )
+        elif "sign in to confirm" in error_text or "not a bot" in error_text:
             if YT_DLP_COOKIES_FILE and os.path.isfile(YT_DLP_COOKIES_FILE):
                 cookie_help = (
                     "فایل کوکی تنظیم شده، اما یوتیوب آن را نپذیرفت یا منقضی شده است. "

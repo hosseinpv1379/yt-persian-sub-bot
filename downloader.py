@@ -66,9 +66,15 @@ def download_video_with_persian_subtitle(url: str) -> tuple[str, str]:
         # auto-caption/auto-translation track when one is available.
         "writesubtitles": True,
         "writeautomaticsub": True,
-        "subtitleslangs": ["fa", "fa.*"],
+        # Request only the needed language; broad regexes can request extra
+        # translated tracks and trigger YouTube's subtitle rate limit.
+        "subtitleslangs": ["fa"],
         "subtitlesformat": "srt/best",
         "convertsubtitles": "srt",
+        # YouTube commonly rate-limits auto-translated tracks unless requests
+        # are spaced well apart.
+        "sleep_interval_requests": 1,
+        "sleep_interval_subtitles": 60,
     }
     try:
         with _youtube_dl(ydl_opts) as ydl:
