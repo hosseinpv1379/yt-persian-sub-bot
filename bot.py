@@ -15,11 +15,13 @@ from config import (
     MAX_CONCURRENT_JOBS,
     PUBLIC_BASE_URL,
     PUBLIC_DIR,
-    WORK_DIR,
     YT_DLP_COOKIES_FILE,
 )
-from downloader import VideoTooLongError, download_video
-from subtitles import TranslationRateLimitError, transcribe, translate_to_persian, write_srt
+from downloader import (
+    PersianSubtitlesUnavailableError,
+    VideoTooLongError,
+    download_video_with_persian_subtitle,
+)
 from utils import extract_youtube_url
 
 logging.basicConfig(level=logging.INFO)
@@ -39,20 +41,9 @@ def _process(url: str, status_cb) -> str:
     video_path = srt_path = output_path = None
     completed = False
     try:
-        status_cb("در حال دانلود ویدیو...")
-        video_path = download_video(url)
+        status_cb("در حال دریافت ویدیو و زیرنویس فارسی از یوتیوب...")
+        video_path, srt_path = download_video_with_persian_subtitle(url)
         job_id = os.path.splitext(os.path.basename(video_path))[0]
-
-        status_cb("در حال تشخیص گفتار و تولید زیرنویس...")
-        segments = transcribe(video_path)
-        if not segments:
-            raise RuntimeError("گفتاری برای ساخت زیرنویس در این ویدیو پیدا نشد.")
-
-        status_cb("در حال ترجمه زیرنویس به فارسی...")
-        fa_segments = translate_to_persian(segments)
-
-        srt_path = os.path.join(WORK_DIR, f"{job_id}.srt")
-        write_srt(fa_segments, srt_path)
 
         status_cb("در حال چسباندن زیرنویس به ویدیو...")
         os.makedirs(PUBLIC_DIR, exist_ok=True)
@@ -105,10 +96,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except VideoTooLongError as e:
         await status_message.edit_text(str(e))
         return
-    except TranslationRateLimitError as e:
-        logger.warning("translation service rate-limited the request: %s", e)
+    except PersianSubtitlesUnavailableError:
         await status_message.edit_text(
-            "سرویس ترجمهٔ گوگل موقتاً درخواست‌ها را محدود کرده است. کمی بعد دوباره لینک را بفرستید."
+            "برای این ویدیو زیرنویس فارسی یا ترجمهٔ فارسیِ زیرنویس در YouTube در دسترس نیست."
         )
         return
     except FileNotFoundError as e:

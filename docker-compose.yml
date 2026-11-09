@@ -6,7 +6,6 @@ services:
     volumes:
       - ./downloads:/app/downloads
       - ./public:/app/public
-      - whisper-cache:/root/.cache
       - ./secrets:/run/secrets:ro
     restart: unless-stopped
 
@@ -17,6 +16,3 @@ services:
     ports:
       - "8080:80"
     restart: unless-stopped
-
-volumes:
-  whisper-cache:

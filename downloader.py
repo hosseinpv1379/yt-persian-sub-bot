@@ -13,6 +13,10 @@ class VideoTooLongError(Exception):
     pass
 
 
+class PersianSubtitlesUnavailableError(Exception):
+    pass
+
+
 @contextmanager
 def _youtube_dl(options: dict):
     options = {"quiet": True, "noplaylist": True, **options}
@@ -43,7 +47,7 @@ def probe_duration(url: str) -> float:
     return float(info.get("duration") or 0)
 
 
-def download_video(url: str) -> str:
+def download_video_with_persian_subtitle(url: str) -> tuple[str, str]:
     duration = probe_duration(url)
     if duration and duration > MAX_VIDEO_MINUTES * 60:
         raise VideoTooLongError(
@@ -58,6 +62,13 @@ def download_video(url: str) -> str:
         "format": f"bestvideo[height<={MAX_VIDEO_HEIGHT}]+bestaudio/best[height<={MAX_VIDEO_HEIGHT}]",
         "merge_output_format": "mp4",
         "outtmpl": out_template,
+        # Prefer a creator-provided Persian track, then YouTube's Persian
+        # auto-caption/auto-translation track when one is available.
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": ["fa", "fa.*"],
+        "subtitlesformat": "srt/best",
+        "convertsubtitles": "srt",
     }
     try:
         with _youtube_dl(ydl_opts) as ydl:
@@ -76,7 +87,18 @@ def download_video(url: str) -> str:
             if not matches:
                 raise yt_dlp.utils.DownloadError("yt-dlp finished without producing a video file")
             final_path = matches[0]
-        return final_path
+
+        subtitle_matches = sorted(
+            os.path.join(WORK_DIR, name)
+            for name in os.listdir(WORK_DIR)
+            if name.startswith(f"{job_id}.fa") and name.lower().endswith(".srt")
+        )
+        if not subtitle_matches:
+            raise PersianSubtitlesUnavailableError(
+                "This video does not expose Persian subtitles or a Persian auto-translated track through YouTube."
+            )
+        subtitle_matches.sort(key=lambda path: 0 if os.path.basename(path) == f"{job_id}.fa.srt" else 1)
+        return final_path, subtitle_matches[0]
     except Exception:
         for name in os.listdir(WORK_DIR):
             if name.startswith(f"{job_id}."):
