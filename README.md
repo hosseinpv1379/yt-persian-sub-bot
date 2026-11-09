@@ -80,7 +80,7 @@ docker compose down
 
 اگر ترجیح می‌دهی بدون Docker اجرا کنی:
 
-- Python 3.10+
+- Python 3.11+ (نسخهٔ فعلی yt-dlp به Python 3.11 یا جدیدتر نیاز دارد)
 - ffmpeg نصب‌شده روی سیستم و قابل‌دسترس در PATH (باید `libass` داشته باشد؛ بیلدهای رسمی ffmpeg این را دارند)
 - یک فونت فارسی نصب‌شده که fontconfig بشناسدش، مثلاً [Vazirmatn](https://github.com/rastikerdar/vazirmatn) (برای راست‌به‌چپ و شکل درست حروف فارسی لازم است)
 

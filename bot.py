@@ -15,6 +15,7 @@ from config import (
     MAX_CONCURRENT_JOBS,
     PUBLIC_BASE_URL,
     PUBLIC_DIR,
+    WORK_DIR,
 )
 from downloader import VideoTooLongError, download_video
 from subtitles import transcribe, translate_to_persian, write_srt
@@ -34,34 +35,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _process(url: str, status_cb) -> str:
-    status_cb("در حال دانلود ویدیو...")
-    video_path = download_video(url)
-    job_id = os.path.splitext(os.path.basename(video_path))[0]
+    video_path = srt_path = output_path = None
+    completed = False
+    try:
+        status_cb("در حال دانلود ویدیو...")
+        video_path = download_video(url)
+        job_id = os.path.splitext(os.path.basename(video_path))[0]
 
-    status_cb("در حال تشخیص گفتار و تولید زیرنویس...")
-    segments = transcribe(video_path)
+        status_cb("در حال تشخیص گفتار و تولید زیرنویس...")
+        segments = transcribe(video_path)
+        if not segments:
+            raise RuntimeError("گفتاری برای ساخت زیرنویس در این ویدیو پیدا نشد.")
 
-    status_cb("در حال ترجمه زیرنویس به فارسی...")
-    fa_segments = translate_to_persian(segments)
+        status_cb("در حال ترجمه زیرنویس به فارسی...")
+        fa_segments = translate_to_persian(segments)
 
-    srt_path = video_path.rsplit(".", 1)[0] + ".srt"
-    write_srt(fa_segments, srt_path)
+        srt_path = os.path.join(WORK_DIR, f"{job_id}.srt")
+        write_srt(fa_segments, srt_path)
 
-    status_cb("در حال چسباندن زیرنویس به ویدیو...")
-    os.makedirs(PUBLIC_DIR, exist_ok=True)
-    output_path = os.path.join(PUBLIC_DIR, f"{job_id}_fa.mp4")
-    burn_subtitles(video_path, srt_path, output_path)
-
-    for path in (video_path, srt_path):
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-
-    return output_path
+        status_cb("در حال چسباندن زیرنویس به ویدیو...")
+        os.makedirs(PUBLIC_DIR, exist_ok=True)
+        output_path = os.path.join(PUBLIC_DIR, f"{job_id}_fa.mp4")
+        burn_subtitles(video_path, srt_path, output_path)
+        completed = True
+        return output_path
+    finally:
+        for path in (video_path, srt_path):
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    logger.warning("could not remove temporary file %s", path)
+        if not completed and output_path:
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
     text = update.message.text or ""
     url = extract_youtube_url(text)
     if not url:
@@ -78,12 +92,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        asyncio.run_coroutine_threadsafe(_edit(), loop)
+        try:
+            # Keep status edits ordered so an earlier update cannot arrive
+            # after the final success/error message.
+            asyncio.run_coroutine_threadsafe(_edit(), loop).result()
+        except Exception:
+            pass
 
     try:
         output_path = await loop.run_in_executor(executor, _process, url, status_cb)
     except VideoTooLongError as e:
         await status_message.edit_text(str(e))
+        return
+    except FileNotFoundError as e:
+        logger.error("required file is unavailable: %s", e)
+        await status_message.edit_text("یک فایل لازم برای پردازش پیدا نشد. مدیر ربات باید تنظیمات سرور را بررسی کند.")
         return
     except DownloadError as e:
         logger.warning("video download failed: %s", e)
@@ -99,6 +122,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_message.edit_text("خطا در پردازش ویدیو. لطفاً به مدیر ربات اطلاع دهید.")
         return
 
+    if not os.path.isfile(output_path):
+        logger.error("processing returned a missing output file: %s", output_path)
+        await status_message.edit_text("فایل خروجی ساخته نشد. لطفاً دوباره تلاش کنید.")
+        return
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
     link = f"{PUBLIC_BASE_URL}/{os.path.basename(output_path)}"
     await status_message.edit_text(

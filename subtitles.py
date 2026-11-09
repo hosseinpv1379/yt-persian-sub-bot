@@ -28,8 +28,10 @@ def translate_to_persian(segments):
     for start, end, text in segments:
         try:
             fa_text = translator.translate(text)
-        except Exception:
-            fa_text = text
+        except Exception as exc:
+            raise RuntimeError("ترجمهٔ زیرنویس انجام نشد؛ سرویس ترجمه را بررسی کنید.") from exc
+        if not fa_text:
+            raise RuntimeError("سرویس ترجمه برای بخشی از زیرنویس پاسخ خالی داد.")
         translated.append((start, end, fa_text))
     return translated
 

@@ -17,7 +17,9 @@ def burn_subtitles(video_path: str, srt_path: str, output_path: str):
         "-c:v", "libx264",
         "-crf", "20",
         "-preset", "fast",
-        "-c:a", "copy",
+        # Re-encode audio so WebM/Opus inputs also produce broadly compatible MP4s.
+        "-c:a", "aac",
+        "-b:a", "192k",
         output_path,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)

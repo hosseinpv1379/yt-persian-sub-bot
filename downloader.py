@@ -33,7 +33,14 @@ def _youtube_dl(options: dict):
 def probe_duration(url: str) -> float:
     with _youtube_dl({}) as ydl:
         info = ydl.extract_info(url, download=False)
-    return info.get("duration") or 0
+    if not info:
+        raise yt_dlp.utils.DownloadError("yt-dlp could not read video information")
+    # Some extractors return a playlist-like object despite noplaylist. Prefer
+    # the selected video's duration when available.
+    if info.get("_type") == "playlist":
+        entries = info.get("entries") or []
+        info = next((entry for entry in entries if entry), {})
+    return float(info.get("duration") or 0)
 
 
 def download_video(url: str) -> str:
@@ -52,13 +59,29 @@ def download_video(url: str) -> str:
         "merge_output_format": "mp4",
         "outtmpl": out_template,
     }
-    with _youtube_dl(ydl_opts) as ydl:
-        ydl.download([url])
+    try:
+        with _youtube_dl(ydl_opts) as ydl:
+            result = ydl.download([url])
 
-    final_path = os.path.join(WORK_DIR, f"{job_id}.mp4")
-    if not os.path.exists(final_path):
+        if result:
+            raise yt_dlp.utils.DownloadError("yt-dlp could not download the requested video")
+
+        final_path = os.path.join(WORK_DIR, f"{job_id}.mp4")
+        if not os.path.isfile(final_path):
+            matches = [
+                os.path.join(WORK_DIR, name)
+                for name in os.listdir(WORK_DIR)
+                if name.startswith(f"{job_id}.") and os.path.isfile(os.path.join(WORK_DIR, name))
+            ]
+            if not matches:
+                raise yt_dlp.utils.DownloadError("yt-dlp finished without producing a video file")
+            final_path = matches[0]
+        return final_path
+    except Exception:
         for name in os.listdir(WORK_DIR):
-            if name.startswith(job_id):
-                final_path = os.path.join(WORK_DIR, name)
-                break
-    return final_path
+            if name.startswith(f"{job_id}."):
+                try:
+                    os.remove(os.path.join(WORK_DIR, name))
+                except OSError:
+                    pass
+        raise
