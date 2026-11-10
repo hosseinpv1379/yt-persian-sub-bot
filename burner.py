@@ -1,27 +1,19 @@
 import subprocess
 
-from config import SUBTITLE_FONT
-
-
-def burn_subtitles(video_path: str, srt_path: str, output_path: str):
-    escaped_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-    style = (
-        f"FontName={SUBTITLE_FONT},FontSize=20,PrimaryColour=&H00FFFFFF,"
-        "OutlineColour=&H00000000,BorderStyle=3,Outline=1,Shadow=0,MarginV=30"
-    )
-    vf = f"subtitles='{escaped_srt}':force_style='{style}'"
+def mux_subtitles(video_path: str, srt_path: str, output_path: str):
+    """Add selectable SRT subtitles without re-encoding video or audio."""
     cmd = [
-        "ffmpeg", "-y",
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-i", video_path,
-        "-vf", vf,
-        "-c:v", "libx264",
-        "-crf", "20",
-        "-preset", "fast",
-        # Re-encode audio so WebM/Opus inputs also produce broadly compatible MP4s.
-        "-c:a", "aac",
-        "-b:a", "192k",
+        "-i", srt_path,
+        "-map", "0",
+        "-map", "1:0",
+        "-c", "copy",
+        "-c:s", "srt",
+        "-metadata:s:s:0", "language=fas",
+        "-disposition:s:s:0", "default",
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {result.stderr[-2000:]}")

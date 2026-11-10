@@ -2,12 +2,13 @@ import asyncio
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote, urlsplit
 
 from yt_dlp.utils import DownloadError
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from burner import burn_subtitles
+from burner import mux_subtitles
 from cleanup import cleanup_old_files
 from config import (
     BOT_TOKEN,
@@ -33,7 +34,7 @@ executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_JOBS)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "سلام! لینک ویدیوی یوتیوب رو برام بفرست تا دانلودش کنم و با زیرنویس فارسی چسبیده برات بفرستم."
+        "سلام! لینک ویدیوی یوتیوب رو بفرست تا ویدیو و زیرنویس فارسی YouTube رو بگیرم و لینک فایل آماده رو برات بفرستم."
     )
 
 
@@ -45,10 +46,10 @@ def _process(url: str, status_cb) -> str:
         video_path, srt_path = download_video_with_persian_subtitle(url)
         job_id = os.path.splitext(os.path.basename(video_path))[0]
 
-        status_cb("در حال چسباندن زیرنویس به ویدیو...")
+        status_cb("در حال افزودن زیرنویس به فایل ویدیو...")
         os.makedirs(PUBLIC_DIR, exist_ok=True)
-        output_path = os.path.join(PUBLIC_DIR, f"{job_id}_fa.mp4")
-        burn_subtitles(video_path, srt_path, output_path)
+        output_path = os.path.join(PUBLIC_DIR, f"{job_id}_fa.mkv")
+        mux_subtitles(video_path, srt_path, output_path)
         completed = True
         return output_path
     finally:
@@ -145,7 +146,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_message.edit_text("فایل خروجی ساخته نشد. لطفاً دوباره تلاش کنید.")
         return
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    link = f"{PUBLIC_BASE_URL}/{os.path.basename(output_path)}"
+    link = f"{PUBLIC_BASE_URL}/{quote(os.path.basename(output_path))}"
     await status_message.edit_text(
         "ویدیو آماده شد ✅ (به‌خاطر محدودیت حجم فایل در تلگرام، به‌جای ارسال مستقیم، لینک دانلود می‌فرستم):\n\n"
         f"{link}\n\n"
@@ -165,6 +166,18 @@ def main():
         raise RuntimeError(
             "PUBLIC_BASE_URL تنظیم نشده است. آدرسی که وب‌سرور فایل‌ها از آن در دسترس است را در .env بگذار "
             "(مثلاً http://SERVER_IP:8080)."
+        )
+    public_url = urlsplit(PUBLIC_BASE_URL)
+    if (
+        public_url.scheme not in {"http", "https"}
+        or not public_url.hostname
+        or public_url.hostname in {"localhost", "127.0.0.1", "0.0.0.0"}
+        or public_url.path not in {"", "/"}
+        or "YOUR_SERVER_IP" in PUBLIC_BASE_URL
+    ):
+        raise RuntimeError(
+            "PUBLIC_BASE_URL معتبر نیست یا برای کاربران اینترنت قابل‌دسترسی نیست؛ "
+            "دامنه یا IP عمومی را بدون مسیر اضافه تنظیم کن (مثلاً http://SERVER_IP:8080)."
         )
 
     app = Application.builder().token(BOT_TOKEN).build()
