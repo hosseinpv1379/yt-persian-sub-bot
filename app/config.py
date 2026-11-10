@@ -24,7 +24,10 @@ AWS_REGION = os.environ.get("AWS_REGION","eu-central-1")
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES_FILE","")
 IG_COOKIES_FILE = os.environ.get("IG_COOKIES_FILE","")
 X_COOKIES_FILE = os.environ.get("X_COOKIES_FILE","")
-MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", str(1900*1000*1000)))  # 1.9GB cap (Reza, 2026-10-28): Telegram local-API ceiling is 2000MB, this leaves margin
+MAX_FILE_BYTES = int(os.environ.get(
+    "MAX_FILE_BYTES",
+    str(int(os.environ.get("MAX_FILESIZE_MB", "2000")) * 1_000_000),
+))
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))  # only this Telegram user may use /stats
 POT_BASE_URL = os.environ.get("POT_BASE_URL", "http://pot-provider:4416")
 PROXY = os.environ.get("YTDLP_PROXY", "")

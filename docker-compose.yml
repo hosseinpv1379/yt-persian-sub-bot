@@ -16,7 +16,7 @@ services:
     build: .
     command: ["python","-m","app.bot"]
     env_file: .env
-    volumes: [shared-data:/data]
+    volumes: [shared-data:/data, ./secrets:/run/secrets:ro]
     depends_on: [redis, api]
     restart: unless-stopped
   pot-provider:
@@ -62,7 +62,7 @@ services:
     command: ["python","-m","app.worker"]
     deploy: {replicas: 6}
     env_file: .env
-    volumes: [shared-data:/data]
+    volumes: [shared-data:/data, ./secrets:/run/secrets:ro]
     depends_on: [redis, pot-provider]
     restart: unless-stopped
 volumes:

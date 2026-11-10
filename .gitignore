@@ -5,6 +5,7 @@ __pycache__/
 data/
 downloads/
 cookies.txt
+secrets/
 serverless/tgcloud/lib/config.js
 .tgcloud/
 node_modules/

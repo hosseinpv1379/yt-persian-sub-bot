@@ -106,7 +106,7 @@ npx tgcloud migrate         # ساخت جدول pending
 IP دیتاسنترها را یوتیوب گاهی بلاک می‌کند. راه رسمیِ yt-dlp: کوکی مرورگر خودت.
 1. روی مرورگرت (لاگین در یوتیوب) با افزونه «Get cookies.txt LOCALLY» فایل `cookies.txt` بگیر.
 2. فایل را **امن** (نه با گیت!) روی EC2 بگذار: `scp -i key.pem cookies.txt ubuntu@<IP>:~/file-from-link/data-cookies.txt` و آن را به `/data/cookies.txt` داخل حجم مشترک کپی کن.
-3. در `.env`: ‏`YTDLP_COOKIES_FILE=/data/cookies.txt` → `docker compose restart worker bot api`
+3. فایل کوکی را در `./secrets/youtube-cookies.txt` بگذار، سپس در `.env` خط ‏`YTDLP_COOKIES_FILE=/run/secrets/youtube-cookies.txt` را فعال کن و `docker compose up -d --force-recreate worker bot` را اجرا کن.
 4. کوکی منقضی می‌شود؛ هر چند هفته تازه‌اش کن. فایل کوکی یعنی دسترسی اکانت — مثل پسورد نگهش دار.
 
 ## ۱۰) نگهداری و عیب‌یابی
