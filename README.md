@@ -1,132 +1,59 @@
-# ربات تلگرام دانلود یوتیوب + زیرنویس فارسی
+# File From Link — Telegram Downloader Bot (@FileFromLinkBot)
 
-لینک ویدیوی یوتیوب را برای ربات بفرست. ربات ویدیو و زیرنویس فارسیِ موجود در YouTube را با yt-dlp می‌گیرد و زیرنویس را بدون بازرمزگذاری صدا و تصویر داخل فایل MKV قرار می‌دهد. زیرنویس در پخش‌کننده قابل روشن/خاموش‌کردن است؛ روی تصویر دائماً چسبیده نیست. در نتیجه ffmpeg فقط ترک‌ها را mux می‌کند و مصرف CPU بسیار کمتر می‌شود. دیگر از Whisper یا سرویس ترجمهٔ جداگانه استفاده نمی‌شود؛ اگر YouTube برای ویدیو ترک فارسی ارائه نکند، ربات پیام خطا می‌دهد.
+Download videos/audio from **1,700+ sites** (YouTube, Instagram, TikTok, X, SoundCloud, Vimeo, … — everything [yt-dlp](https://github.com/yt-dlp/yt-dlp) supports) through a Telegram bot, with a proper **job queue**, running on **AWS EC2**.
 
-> چرا لینک به‌جای فایل؟ Bot API معمولی تلگرام اجازهٔ ارسال فایل بیشتر از ۵۰ مگابایت را نمی‌دهد. برای همین ربات فایل نهایی را با Nginx سرو می‌کند و لینک دانلود را در چت می‌فرستد.
+**فارسی:** راهنمای کامل دیپلوی قدم‌به‌قدم → [DEPLOY.fa.md](DEPLOY.fa.md)
 
-## پیش‌نیاز مشترک
+## Architecture
 
-- توکن بات از [@BotFather](https://t.me/BotFather)
-- یک آدرس عمومی (دامنه یا IP سرور) که بتوانی روی آن یک پورت (پیش‌فرض `8080`) را به بیرون باز کنی، چون لینک دانلود باید از گوشی/کامپیوتر کاربر در تلگرام قابل‌دسترس باشد — نه فقط از `localhost`.
+```
+                 ┌──────────────────────────────────────────────┐
+ Link in chat ──►│ Front (pick ONE)                             │
+                 │  A) app/bot.py on EC2 (long-polling) [default]│
+                 │  B) serverless/ Telegram Serverless (V8)     │
+                 └───────────────┬──────────────────────────────┘
+                                 │ POST /jobs  (X-API-Secret)
+                                 ▼
+                 ┌──────────────────────────────────────────────┐
+                 │ EC2 engine                                   │
+                 │  FastAPI (app/api.py) ─► Redis queue (RQ)    │
+                 │  Workers (app/worker.py, scalable)           │
+                 │    └► yt-dlp + ffmpeg ─► file                │
+                 │         ├─ ≤49MB ─► sendVideo/sendDocument   │
+                 │         └─ >49MB ─► S3 presigned link         │
+                 │                    or /files/<token>/ link   │
+                 └──────────────────────────────────────────────┘
+```
 
-## اجرا با Docker (توصیه‌شده)
+**Why not Serverless-only?** Telegram Serverless runs plain JS in a V8 isolate:
+no Python, no npm packages, no ffmpeg, fetch responses capped at 30 MB
+([docs](https://core.telegram.org/bots/serverless)). yt-dlp *cannot* run there.
+Serverless is used here only as an optional instant front-end; all downloading
+happens on EC2.
 
-با این روش نیازی به نصب Python، ffmpeg یا فونت فارسی روی سیستم نیست؛ همه چیز داخل ایمیج ساخته می‌شود.
-
-پیش‌نیاز: Docker و Docker Compose نصب باشند.
+## Quick start (EC2, Mode A)
 
 ```bash
-cd yt-persian-sub-bot
-cp .env.example .env
-```
-
-توکن بات و آدرس عمومی سرور را داخل `.env` قرار بده:
-
-```
-BOT_TOKEN=123456:ABC-your-token
-FILES_PORT=8081
-PUBLIC_BASE_URL=http://SERVER_IP:8081
-```
-
-سرویس فایل داخل کانتینر روی پورت `8081` گوش می‌دهد. اگر `FILES_PORT` روی سرور اشغال است، آن را در `.env` به یک پورت آزاد تغییر بده و پورت `PUBLIC_BASE_URL` را هم همان مقدار بگذار. اگر پشت یک دامنه/ریورس‌پراکسی (مثل Caddy یا nginx با TLS) هستی، آن دامنه را داخل `PUBLIC_BASE_URL` بگذار و سرویس `files` را فقط از طریق آن ریورس‌پراکسی در دسترس بگذار.
-
-بعد بساز و اجرا کن:
-
-```bash
+git clone https://github.com/rzashakeri/file-from-link.git
+cd file-from-link
+cp .env.example .env   # fill BOT_TOKEN + API_SECRET
 docker compose up -d --build
+docker compose logs -f bot worker
 ```
 
-### اگر یوتیوب درخواست ورود کرد
+Full guide (AWS account → EC2 → Security Group → HTTPS → Serverless mode):
+[DEPLOY.fa.md](DEPLOY.fa.md)
 
-ایمیج Docker شامل Deno، بستهٔ `yt-dlp-ejs` و وابستگی `curl-cffi` برای درخواست‌های سازگارتر است. خطای `HTTP 429` روی ترک ترجمه‌شدهٔ YouTube شناخته‌شده است؛ ربات فاصلهٔ ۶۰ ثانیه‌ای پیش از دانلود زیرنویس اعمال می‌کند، اما YouTube ممکن است همچنان کوکی تازه‌ای بخواهد. در یک پنجرهٔ خصوصی/ناشناس وارد YouTube شو، ویدیوی موردنظر را باز کن، زیرنویس را روشن کن و از منوی زیرنویس گزینهٔ ترجمهٔ خودکار به فارسی را انتخاب کن. پس از نمایش چند خط زیرنویس، در همان پنجره و تب `https://www.youtube.com/robots.txt` را باز کن؛ سپس فقط کوکی‌های `youtube.com` را با افزونهٔ معتبر صادر کن و پنجرهٔ خصوصی را ببند. برای بعضی سرورها لازم است مرورگر از همان IP سرور استفاده کند. راهنماهای رسمی: [صدور کوکی YouTube](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies) و [فرمت و روش استفاده از کوکی](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp). استفاده از کوکی حساب ممکن است باعث محدودیت یا مسدود شدن حساب شود؛ فقط در صورت نیاز از آن استفاده کن و فایل را در اختیار دیگران نگذار.
+## Features
+- Quality picker: Best / 720p / 480p / Audio-MP3 (inline keyboard)
+- Redis + RQ queue: concurrent jobs are queued, position shown to the user
+- Per-user limit (default 3 active jobs), job timeout (default 30 min)
+- Progress edits on the status message (download %)
+- Persian YouTube captions are embedded as a selectable subtitle track when available; subtitle files are also delivered separately.
+- >50 MB handling: S3 presigned URL or self-hosted expiring link
+- YouTube cookie support (`YTDLP_COOKIES_FILE`) for "confirm you're not a bot"
+- Two fronts, one engine: EC2 bot **or** Telegram Serverless, same `/jobs` API
 
-```bash
-mkdir -p secrets
-# فایل کوکی صادرشده را به secrets/youtube-cookies.txt منتقل کن
-chmod 600 secrets/youtube-cookies.txt
-```
-
-سپس این خط را به `.env` اضافه کن:
-
-```dotenv
-YT_DLP_COOKIES_FILE=/run/secrets/youtube-cookies.txt
-```
-
-```bash
-docker compose up -d --build --force-recreate bot
-```
-
-فایل `secrets/` داخل ایمیج Docker کپی نمی‌شود و در git هم نادیده گرفته می‌شود؛ Compose آن را فقط برای خواندن در کانتینر قرار می‌دهد. ربات برای استفادهٔ yt-dlp یک کپی موقت می‌سازد و پس از هر درخواست پاک می‌کند. فایل کوکی را به کسی نفرست و در مخزن ثبت نکن. کوکی‌های منقضی‌شده باید دوباره صادر شوند. اگر چالش حتی با کوکی تازه ادامه داشت، ممکن است IP سرور از طرف یوتیوب محدود شده باشد.
-
-لاگ‌ها:
-
-```bash
-docker compose logs -f
-```
-
-توقف:
-
-```bash
-docker compose down
-```
-
-نکات مربوط به دیتا:
-- فایل‌های موقت دانلود داخل پوشهٔ `downloads/` و ویدیوهای نهایی داخل پوشهٔ `public/` کنار پروژه ذخیره می‌شوند؛ سرویس `files` همان پوشهٔ `public/` را روی پورت تعیین‌شده در `FILES_PORT` سرو می‌کند. برای بررسی در دسترس بودن Nginx، آدرس `PUBLIC_BASE_URL/healthz` باید پاسخ خالی `204` بدهد.
-- فایل‌های داخل `public/` به‌صورت خودکار بعد از `FILE_RETENTION_HOURS` ساعت پاک می‌شوند (یک job داخلی هر یک ساعت این پاک‌سازی را انجام می‌دهد).
-- لینک‌ها فقط با یک شناسهٔ تصادفی محافظت می‌شوند، نه با رمز؛ یعنی هرکس لینک را داشته باشد می‌تواند فایل را دانلود کند. اگر این موضوع برایت حساس است، سرویس `files` را پشت یک ریورس‌پراکسی با احراز هویت بگذار.
-- برای ویرایش تنظیمات کافیست `.env` را عوض کنی و `docker compose up -d --build` را دوباره بزنی.
-
-## اجرای مستقیم بدون Docker (اختیاری)
-
-اگر ترجیح می‌دهی بدون Docker اجرا کنی:
-
-- Python 3.11+ (نسخهٔ فعلی yt-dlp به Python 3.11 یا جدیدتر نیاز دارد)
-- ffmpeg نصب‌شده روی سیستم و قابل‌دسترس در PATH
-
-```bash
-cd yt-persian-sub-bot
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-توکن بات را داخل `.env` قرار بده، سپس:
-
-```bash
-python bot.py
-```
-
-سپس در تلگرام با ربات `/start` بزن و یک لینک یوتیوب برایش بفرست.
-
-## تنظیمات (در فایل `.env`)
-
-| متغیر | توضیح | پیش‌فرض |
-|---|---|---|
-| `MAX_VIDEO_MINUTES` | حداکثر طول ویدیوی قابل‌قبول | `20` |
-| `MAX_VIDEO_HEIGHT` | کیفیت دانلود برای کنترل حجم فایل خروجی | `720` |
-| `MAX_CONCURRENT_JOBS` | تعداد پردازش هم‌زمان مجاز | `1` |
-| `PUBLIC_BASE_URL` | آدرسی که وب‌سرور فایل‌ها (`files`/nginx) از بیرون در دسترس است؛ لینک‌های ارسالی با همین پیشوند ساخته می‌شوند | *(باید تنظیم شود)* |
-| `FILE_RETENTION_HOURS` | چند ساعت بعد از ساخت، فایل‌های داخل `public/` پاک شوند | `24` |
-| `YT_DLP_COOKIES_FILE` | مسیر فایل کوکی در قالب Netscape/Mozilla؛ در Docker از `/run/secrets/youtube-cookies.txt` استفاده کن | *(خالی؛ بدون کوکی)* |
-
-## محدودیت‌ها و نکات
-
-- **حجم فایل:** به همین دلیل که Bot API معمولی تلگرام اجازهٔ ارسال فایل بیشتر از ۵۰ مگابایت را نمی‌دهد، ربات فایل نهایی را سرو می‌کند و فقط لینکش را می‌فرستد؛ خودت باید مطمئن شوی `PUBLIC_BASE_URL` از اینترنت در دسترس است (پورت باز، یا پشت دامنه/ریورس‌پراکسی).
-- **زیرنویس:** ربات به وجود ترک فارسی در YouTube وابسته است. اگر ویدیو زیرنویس فارسی یا ترجمهٔ فارسیِ در دسترس yt-dlp نداشته باشد، پردازش متوقف می‌شود؛ ربات صدا را خودش رونویسی یا ترجمه نمی‌کند.
-- **سرعت:** حذف Whisper و ترجمهٔ بیرونی، بار CPU را کم می‌کند. ffmpeg فقط ویدیو، صدا و زیرنویس را داخل MKV قرار می‌دهد و تصویر/صدا را بازرمزگذاری نمی‌کند.
-- **حقوقی:** این ابزار را فقط برای محتوایی استفاده کن که اجازهٔ دانلود/استفادهٔ شخصی یا آموزشی آن را داری و قوانین و شرایط استفادهٔ یوتیوب را در نظر بگیر.
-
-## ساختار پروژه
-
-```
-config.py       تنظیمات از روی متغیرهای محیطی
-utils.py        تشخیص لینک یوتیوب در متن پیام
-downloader.py   دانلود ویدیو با yt-dlp
-burner.py       افزودن ترک زیرنویس به فایل با ffmpeg بدون بازرمزگذاری
-cleanup.py      پاک‌سازی دوره‌ای فایل‌های قدیمی از public/
-bot.py          هندلرهای ربات تلگرام
-Dockerfile      ایمیج شامل Python و ffmpeg
-docker-compose.yml   اجرای ربات با یک دستور
-nginx.conf      سرو فایل‌های خروجی با هدر دانلود
-```
+## Limits (Telegram, not this code)
+- Bots upload max **50 MB** per file — larger results are delivered as links.
+- Some sites (esp. YouTube from datacenter IPs) require cookies / may rate-limit.

@@ -1,26 +1,10 @@
-FROM denoland/deno:bin-2.9.8 AS deno
-
-FROM python:3.11-slim
-
-COPY --from=deno /deno /usr/local/bin/deno
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
+FROM python:3.12-slim
+# Deno: JS runtime yt-dlp needs to solve YouTube's n challenge (EJS solver)
+COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates nodejs && rm -rf /var/lib/apt/lists/*
+WORKDIR /code
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-RUN deno --version
-
-COPY . .
-
-ENV WORK_DIR=/app/downloads
+RUN pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir -U yt-dlp
+COPY app ./app
 ENV PYTHONUNBUFFERED=1
-
-RUN mkdir -p /app/downloads /app/public
-
-CMD ["python", "bot.py"]
+CMD ["python","-m","app.bot"]
