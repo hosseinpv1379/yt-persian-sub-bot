@@ -1,0 +1,444 @@
+"""yt-dlp wrapper: 1,700+ extractors (YouTube, Instagram, TikTok, X, ...).
+
+YouTube from datacenter IPs often hits "Sign in to confirm you're not a bot".
+Mitigations built in, tried in order:
+  1. PO Tokens from the bgutil provider sidecar (docker service pot-provider)
+     via the bgutil-ytdlp-pot-provider plugin.
+  2. Optional cookies file (YTDLP_COOKIES_FILE) — used only if the file exists.
+  3. Fallback player clients (tv, web_safari, ios) retried automatically.
+"""
+from pathlib import Path
+import shutil
+import yt_dlp
+from .config import DOWNLOAD_DIR, COOKIES_FILE, IG_COOKIES_FILE, X_COOKIES_FILE, JOB_TIMEOUT, POT_BASE_URL, PROXY, MAX_FILE_BYTES
+from . import cobalt as _cobalt
+from .utils import format_selector, is_spotify, is_apple_music, classify_url, IMAGE_EXTS, FILE_EXTS
+class DownloadError(Exception): pass
+BOT_WALL_MARKERS = ("not a bot", "sign in to confirm", "po token", "potoken", "needs to be reloaded", "requested format is not available")
+FALLBACK_CLIENTS = ["tv", "ios", "web_safari"]
+def _build_opts(choice, job_id, on_progress, player_client=None, url: str = ''):
+    out = str(DOWNLOAD_DIR / job_id / "%(title).80s.%(ext)s")
+    def hook(d):
+        if on_progress and d.get("status") == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            on_progress(d.get("downloaded_bytes", 0), total)
+    opts = {
+        "format": format_selector(choice), "outtmpl": out, "noplaylist": True,
+        "progress_hooks": [hook], "socket_timeout": 30, "retries": 3,
+        "merge_output_format": "mp4", "quiet": True, "no_warnings": True, "max_filesize": MAX_FILE_BYTES,
+        "extractor_args": {"youtubepot-bgutilhttp": {"base_url": [POT_BASE_URL]}},
+    }
+    if PROXY:
+        opts["proxy"] = PROXY
+    if player_client:
+        opts["extractor_args"]["youtube"] = {"player_client": [player_client]}
+    if "instagram.com" in url and IG_COOKIES_FILE and Path(IG_COOKIES_FILE).exists():
+        opts["cookiefile"] = IG_COOKIES_FILE
+    elif ("x.com" in url or "twitter.com" in url) and X_COOKIES_FILE and Path(X_COOKIES_FILE).exists():
+        opts["cookiefile"] = X_COOKIES_FILE
+    elif COOKIES_FILE and Path(COOKIES_FILE).exists():
+        opts["cookiefile"] = COOKIES_FILE
+    if choice in ("audiohq", "audio", "audiolow"):
+        q = {"audiohq": "320", "audio": "192", "audiolow": "48"}[choice]
+        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": q}]
+    return opts
+def _aparat_resolve(url: str):
+    """yt-dlp's Aparat extractor is broken against Aparat's current pages
+    ('Unable to extract og:title' from the embed page). The WATCH page still
+    carries og:title and direct .mp4 sources — resolve those ourselves and
+    hand yt-dlp the direct file URL."""
+    import httpx, re as _re
+    html = httpx.get(url, timeout=25, follow_redirects=True,
+                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}).text
+    m = _re.search(r'property="og:title" content="([^"]+)"', html)
+    title = m.group(1) if m else None
+    cands = {}
+    for u in _re.findall(r'https://[^"\'\\ ]+?\.mp4[^"\'\\ ]*', html):
+        u = u.replace("&amp;", "&")
+        q = _re.search(r'(\d{3,4})p', u)
+        key = int(q.group(1)) if q else 0
+        if key >= cands.get("q", -1):
+            cands = {"q": key, "url": u}
+    if not cands.get("url"): return None
+    return cands["url"], title
+def _fetch_subtitles(url, job_id, player_client=None):
+    """Best-effort subtitle grab (fa/en incl. auto-captions), isolated from
+    the media download: a subtitle 429 must NEVER fail the whole job
+    (regression found live 2026-10-22 on the features deploy)."""
+    try:
+        opts = _build_opts("best", job_id, None, player_client, url)
+        opts.update({"skip_download": True, "writesubtitles": True, "writeautomaticsub": True,
+                     "subtitleslangs": ["fa.*", "en.*"], "subtitlesformat": "srt/vtt/best",
+                     "retries": 1, "socket_timeout": 15})
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.extract_info(url, download=True)
+    except Exception:
+        pass
+
+def _extract_once(url, choice, job_id, on_progress, player_client=None):
+    opts = _build_opts(choice, job_id, on_progress, player_client, url)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        path = Path(ydl.prepare_filename(info))
+        if choice in ("audiohq", "audio", "audiolow"): path = path.with_suffix(".mp3")
+        if not path.exists():
+            files = sorted((f for f in Path(DOWNLOAD_DIR / job_id).glob("*") if f.suffix.lower() not in (".srt", ".vtt")),
+                           key=lambda p: p.stat().st_size, reverse=True)
+            if not files: raise DownloadError("no output file")
+            path = files[0]
+        if choice not in ("audiohq", "audio", "audiolow", "gif", "togif"):
+            _fetch_subtitles(url, job_id, player_client)
+        subs = sorted((f for f in Path(DOWNLOAD_DIR / job_id).glob("*")
+                       if f.suffix.lower() in (".srt", ".vtt") and f != path),
+                      key=lambda f: (f.suffix.lower() != ".srt", f.name))[:2]
+        return path, {"title": info.get("title", ""), "duration": info.get("duration"),
+                      "extractor": info.get("extractor_key", ""),
+                      "description": (info.get("description") or "").strip(),
+                      "subtitles": [str(s) for s in subs]}
+_IG_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+def _shortcode_id(code: str) -> int:
+    n = 0
+    for ch in code: n = n * 64 + _IG_ALPHABET.index(ch)
+    return n
+
+def _ig_slide_count(url: str) -> int:
+    """Slides in an Instagram post via the media-info API; 0 on any error.
+    An all-video carousel fools yt-dlp into downloading only slide 1 (no
+    'No video formats found' error), so download() checks this FIRST.
+    Retries once on transient failures: a single flaky 429 must not be
+    mistaken for 'not a carousel' — that mistake ships a silent 1-slide result."""
+    import httpx, re as _re, time as _time
+    from .ig import _ig_cookie_header, _UA
+    m = _re.search(r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", url)
+    if not m: return 0
+    headers = {**_UA, "X-IG-App-ID": "936619743392459", **_ig_cookie_header()}
+    media_id = _shortcode_id(m.group(1))
+    for attempt in (1, 2):
+        try:
+            r = httpx.get(f"https://i.instagram.com/api/v1/media/{media_id}/info/",
+                          headers=headers, timeout=15, follow_redirects=True)
+            if r.status_code == 429 and attempt == 1:
+                _time.sleep(4); continue
+            r.raise_for_status()
+            items = r.json().get("items") or []
+            if not items: return 0
+            return len(items[0].get("carousel_media") or [])
+        except Exception:
+            if attempt == 1:
+                _time.sleep(4); continue
+            return 0
+    return 0
+
+def _ig_api_download(url: str, choice: str, job_id: str, on_progress=None):
+    """Photo posts and carousels: yt-dlp's Instagram extractor only sees
+    videos ('No video formats found!'), but the media-info API (with the
+    burner session) returns every slide. Downloads all slides as
+    originals; audio choices extract from the first video slide."""
+    import httpx, re as _re
+    from .ig import _ig_cookie_header, _UA
+    sm = _re.search(r"instagram\.com/stories/[^/]+/(\d{10,})", url)
+    if sm:
+        media_id = int(sm.group(1))
+    else:
+        m = _re.search(r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", url)
+        if not m: raise DownloadError("could not parse the Instagram link")
+        media_id = _shortcode_id(m.group(1))
+    headers = {**_UA, "X-IG-App-ID": "936619743392459", **_ig_cookie_header()}
+    r = httpx.get(f"https://i.instagram.com/api/v1/media/{media_id}/info/",
+                  headers=headers, timeout=30, follow_redirects=True)
+    if r.status_code != 200: raise DownloadError(f"Instagram refused the request ({r.status_code})")
+    items = r.json().get("items") or []
+    if not items: raise DownloadError("post not found (private or deleted?)")
+    item = items[0]
+    caption = ((item.get("caption") or {}).get("text") or "").strip()
+    title = (caption.split("\n")[0][:80] if caption else "") or (item.get("user") or {}).get("username") or "Instagram post"
+    _dm = _re.search(r"(\d{3,4})", choice or "")
+    _target = int(_dm.group(1)) if _dm else None
+    def _pick(versions):
+        if _target:
+            under = [v for v in versions if (v.get("height") or 0) <= _target]
+            if under: return max(under, key=lambda v: (v.get("width") or 0) * (v.get("height") or 0))
+            return min(versions, key=lambda v: v.get("height") or 10 ** 9)
+        return max(versions, key=lambda v: (v.get("width") or 0) * (v.get("height") or 0))
+    media = []
+    for s in (item.get("carousel_media") or [item]):
+        if s.get("video_versions"):
+            media.append(("video", _pick(s["video_versions"])["url"]))
+        elif (s.get("image_versions2") or {}).get("candidates"):
+            media.append(("image", _pick(s["image_versions2"]["candidates"])["url"]))
+    if not media: raise DownloadError("no media found in this post")
+    if choice in ("audiohq", "audio", "audiolow"):
+        vids = [u for k, u in media if k == "video"]
+        if not vids: raise DownloadError("This post has no video to extract audio from.")
+        return _extract_once(vids[0], choice, job_id, on_progress, None)
+    dest = Path(DOWNLOAD_DIR / job_id); dest.mkdir(parents=True, exist_ok=True)
+    files = []
+    media = media[:20]  # Instagram allows up to 20 slides per carousel
+    with httpx.Client(timeout=180, follow_redirects=True) as client:
+        for i, (kind, mu) in enumerate(media, 1):
+            fp = dest / f"slide_{i:02d}{'.mp4' if kind == 'video' else '.jpg'}"
+            with client.stream("GET", mu, headers=_UA) as resp:
+                resp.raise_for_status()
+                with open(fp, "wb") as f:
+                    for chunk in resp.iter_bytes(1 << 16): f.write(chunk)
+            files.append(fp)
+            if on_progress: on_progress(i, len(media))
+    return files[0], {"title": title, "duration": None, "extractor": "InstagramAPI",
+                      "description": caption, "subtitles": [], "files": [str(f) for f in files]}
+
+def download(url: str, choice: str, job_id: str, on_progress=None, lang: str = "en") -> tuple[Path, dict]:
+    Path(DOWNLOAD_DIR / job_id).mkdir(parents=True, exist_ok=True)
+    if choice == "gplay":
+        # Google Play: gplaydl library (unofficial Play API), base APK +
+        # split APKs + OBB/asset packs, SHA-verified by gplaydl itself.
+        from .gplay import download_play_apk, GooglePlayError, extract_package
+        package = extract_package(url)
+        if not package:
+            raise DownloadError("could not read the package name from that Play link")
+        try:
+            return download_play_apk(package, job_id, lang, on_progress)
+        except GooglePlayError as e:
+            raise DownloadError(str(e)) from e
+    if choice == "ghfile":
+        # GitHub release asset: plain HTTP download, no yt-dlp involved.
+        from .github import download_asset, GitHubError
+        try:
+            return download_asset(url, job_id, on_progress)
+        except GitHubError as e:
+            raise DownloadError(str(e)) from e
+    # Hybrid routing: Cobalt-covered services try the Cobalt intermediary
+    # first (no burner session needed -- this is what fixes Instagram while
+    # its session is dead). Any Cobalt failure falls through to the
+    # existing IG-API / yt-dlp paths below.
+    if _cobalt.cobalt_supported(url):
+        try:
+            return _cobalt.cobalt_download(url, choice, job_id, on_progress)
+        except _cobalt.CobaltError:
+            pass
+    # Stories: yt-dlp's story extractor is broken against current Instagram
+    # (its video-info sub-request fails with HTTP 400 even with a valid
+    # session). Story URLs carry the numeric media id — go straight to the API.
+    import re as _re_dl
+    if _re_dl.search(r"instagram\.com/stories/[^/]+/\d{10,}", url):
+        return _ig_api_download(url, choice, job_id, on_progress)
+    if "instagram.com" in url and "/p/" in url:
+        n = _ig_slide_count(url)
+        if n > 1:
+            return _ig_api_download(url, choice, job_id, on_progress)
+        if n == 0:
+            # Probe failed (flaky API / 429) — we cannot tell a single post
+            # from a carousel, and yt-dlp silently ships only slide 1 of an
+            # all-video carousel. So download via yt-dlp first, then re-probe:
+            # if the post really has >1 slides, redo it through the API path
+            # instead of delivering a partial result to the user.
+            try:
+                path, meta = _download_ytdlp(url, choice, job_id, on_progress)
+            except DownloadError as e:
+                try: return _ig_api_download(url, choice, job_id, on_progress)
+                except DownloadError: raise e
+            if _ig_slide_count(url) > 1:
+                shutil.rmtree(Path(DOWNLOAD_DIR / job_id), ignore_errors=True)
+                Path(DOWNLOAD_DIR / job_id).mkdir(parents=True, exist_ok=True)
+                return _ig_api_download(url, choice, job_id, on_progress)
+            return path, meta
+    try:
+        return _download_ytdlp(url, choice, job_id, on_progress)
+    except DownloadError as e:
+        if "instagram.com" in url and any(s in url for s in ("/p/", "/reel/", "/reels/", "/tv/")):
+            try: return _ig_api_download(url, choice, job_id, on_progress)
+            except DownloadError: pass
+        if "youtu" in url:
+            # YouTube fallback (reverse order vs other services): yt-dlp
+            # stays first (subtitles/description/tiers); our own Cobalt is
+            # a second chance for muxed/audio formats only -- merge jobs
+            # raise CobaltError and we keep the original yt-dlp error.
+            try: return _cobalt.cobalt_download(url, choice, job_id, on_progress)
+            except _cobalt.CobaltError: pass
+        raise
+
+def _download_ytdlp(url: str, choice: str, job_id: str, on_progress=None) -> tuple[Path, dict]:
+    attempts = [None] + FALLBACK_CLIENTS if "youtu" in url else [None]
+    last_error = None
+    for client in attempts:
+        try:
+            return _extract_once(url, choice, job_id, on_progress, client)
+        except yt_dlp.utils.DownloadError as e:
+            last_error = e
+            msg = str(e).lower()
+            if client is not attempts[-1] and any(m in msg for m in BOT_WALL_MARKERS):
+                continue  # bot wall -> try the next player client
+            raise DownloadError(str(e)[:500]) from e
+    raise DownloadError("This file is larger than the 1 GB limit."
+                        if last_error and ("max-filesize" in str(last_error) or "larger than" in str(last_error))
+                        else (str(last_error)[:500] if last_error else "download failed"))
+
+def get_direct_url(url: str, choice: str) -> str | None:
+    """Best-effort fresh direct stream URL from the source (signed, expiring,
+    often bound to THIS server's IP — a convenience link, not a guarantee)."""
+    attempts = [None] + FALLBACK_CLIENTS if "youtu" in url else [None]
+    for client in attempts:
+        try:
+            opts = _build_opts(choice, "urlprobe", None, client, url)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if info.get("url"): return info["url"]
+            for f in info.get("requested_formats") or []:
+                if f.get("url") and f.get("vcodec") not in (None, "none"): return f["url"]
+            return None
+        except yt_dlp.utils.DownloadError as e:
+            if client is not attempts[-1] and any(m in str(e).lower() for m in BOT_WALL_MARKERS): continue
+            return None
+    return None
+
+def _est_size(f: dict, duration: float) -> float:
+    if f.get("filesize"): return float(f["filesize"])
+    if f.get("filesize_approx"): return float(f["filesize_approx"])
+    if f.get("tbr") and duration: return float(f["tbr"]) * 1000 / 8 * duration
+    return 0.0
+
+def _to_quality_list(heights: dict) -> list[dict]:
+    return [{"height": h, "mb": (heights[h] / 1048576) if heights[h] else None}
+            for h in sorted(heights, reverse=True)]
+
+def _classify_infos(infos: list) -> dict:
+    """Kind of the probed media + its real options, unioned across the
+    infos (YouTube is probed once per player client that answers).
+    Video wins over photo/audio (a video page may also list a poster
+    image); photo wins over audio. Returns:
+    {"kind": "video"|"photo"|"audio"|"file"|"unknown",
+     "heights": [{"height", "mb"}], "images": [(w, h)...],
+     "has_audio": bool}"""
+    heights: dict[int, float] = {}
+    images: list[tuple[int, int]] = []
+    seen_img: set[tuple[int, int]] = set()
+    has_audio = False
+    single_ext = None
+    n_formats = 0
+    for info in infos:
+        fmts = info.get("formats") or []
+        n_formats += len(fmts)
+        if len(fmts) == 1:
+            single_ext = (fmts[0].get("ext") or "").lower()
+        dur = float(info.get("duration") or 0)
+        aud = max((_est_size(f, dur) for f in fmts
+                   if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")), default=0.0)
+        if aud: has_audio = True
+        for f in fmts:
+            h = f.get("height")
+            vc = f.get("vcodec")
+            ext = (f.get("ext") or "").lower()
+            if vc == "images" or (vc in (None, "none") and ext in IMAGE_EXTS):
+                w = f.get("width") or 0
+                key = (w, h or 0)
+                if h and key not in seen_img:
+                    seen_img.add(key); images.append(key)
+                continue
+            if not h or vc in (None, "none"): continue
+            if str(f.get("format_id", "")).startswith("sb"): continue
+            total = _est_size(f, dur) + (aud if f.get("acodec") in (None, "none") else 0.0)
+            if total > heights.get(h, 0): heights[h] = total
+    images.sort(key=lambda wh: wh[0] * wh[1], reverse=True)
+    heights_list = _to_quality_list(heights)
+    if heights_list: kind = "video"
+    elif images: kind = "photo"
+    elif has_audio: kind = "audio"
+    elif n_formats == 1 and single_ext in FILE_EXTS: kind = "file"
+    else: kind = "unknown"
+    return {"kind": kind, "heights": heights_list, "images": images[:4], "has_audio": has_audio}
+
+def _probe_info(url: str) -> list:
+    """extract_info without downloading. YouTube: one probe per player
+    client that answers (same set list_qualities used). Raises the last
+    error when no client answers at all."""
+    clients = [None] + FALLBACK_CLIENTS if "youtu" in url else [None]
+    infos, last_err = [], None
+    for client in clients:
+        try:
+            opts = _build_opts("best", "probe", None, client, url)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                infos.append(ydl.extract_info(url, download=False))
+        except Exception as e:
+            last_err = e; continue
+    if not infos:
+        if last_err: raise last_err
+        raise DownloadError("probe failed")
+    return infos
+
+def probe_media(url: str) -> dict:
+    """What kind of media a link is, and its real download options.
+    Direct file links are classified from the extension alone (no
+    network). Everything else is probed; an Instagram post whose probe
+    finds no video formats is a photo post (yt-dlp only sees videos)."""
+    kind = classify_url(url)
+    if kind:
+        return {"kind": kind, "heights": [], "images": [], "has_audio": kind == "audio"}
+    try:
+        infos = _probe_info(url)
+    except Exception as e:
+        if ("instagram.com" in url and any(s in url for s in ("/p/", "/reel/", "/reels/", "/tv/"))
+                and "no video formats" in str(e).lower()):
+            return {"kind": "photo", "heights": [], "images": [], "has_audio": False}
+        return {"kind": "unknown", "heights": [], "images": [], "has_audio": False}
+    return _classify_infos(infos)
+
+def list_qualities_generic(url: str) -> list[dict]:
+    """Single quick probe for non-YouTube sources (Instagram, TikTok, X, ...).
+    Returns [] when the site will not describe its formats — the caller then
+    falls back to the static quality list."""
+    return _classify_infos(_probe_info(url))["heights"]
+
+def list_qualities(url: str) -> list[dict]:
+    """Real downloadable resolutions for THIS video (union across the player
+    clients that answer), each with an approximate total size in MB."""
+    return _classify_infos(_probe_info(url))["heights"]
+
+def _spotify_query(url: str) -> str:
+    import httpx
+    r = httpx.get("https://open.spotify.com/oembed", params={"url": url}, timeout=20, follow_redirects=True)
+    r.raise_for_status(); d = r.json()
+    return f"{d.get('title','')} {d.get('author_name','')}".strip()
+def _apple_query(url: str) -> str:
+    import httpx, json as _json, re as _re
+    html = httpx.get(url, timeout=20, follow_redirects=True,
+                     headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}).text
+    for m in _re.finditer(r'<script type="application/ld\+json">(.*?)</script>', html, _re.S):
+        try: data = _json.loads(m.group(1))
+        except Exception: continue
+        items = data if isinstance(data, list) else [data]
+        for it in items:
+            if isinstance(it, dict) and it.get("@type") in ("MusicRecording", "MusicAlbum"):
+                name = it.get("name", "")
+                artist = ((it.get("byArtist") or {}).get("name") if isinstance(it.get("byArtist"), dict) else "") or ""
+                if name: return f"{name} {artist}".strip()
+    m = _re.search(r"<title>(.*?)</title>", html, _re.S)
+    if m:
+        title = m.group(1).replace(" – Apple Music", "").replace(" - Apple Music", "").strip()
+        title = _re.sub(r"\s+", " ", title)
+        if title: return title
+    return ""
+def resolve_stream_match(url: str) -> str:
+    """Spotify / Apple Music links are DRM-locked — no direct download exists.
+    Standard bot approach: identify the track, download the same track from YouTube."""
+    try:
+        q = _spotify_query(url) if is_spotify(url) else _apple_query(url)
+    except Exception:
+        q = ""
+    if not q: raise DownloadError("could not read the track info from that link")
+    info, last_err = None, None
+    for client in [None] + FALLBACK_CLIENTS:
+        opts = {"quiet": True, "no_warnings": True, "skip_download": True,
+                "extractor_args": {"youtubepot-bgutilhttp": {"base_url": [POT_BASE_URL]}}}
+        if PROXY: opts["proxy"] = PROXY
+        if COOKIES_FILE and Path(COOKIES_FILE).exists(): opts["cookiefile"] = COOKIES_FILE
+        if client: opts["extractor_args"]["youtube"] = {"player_client": [client]}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(f"ytsearch1:{q} audio", download=False)
+            break
+        except Exception as e:
+            last_err = e; continue
+    if info is None: raise DownloadError(str(last_err)[:200] if last_err else "YouTube search failed")
+    entries = info.get("entries") or []
+    if not entries: raise DownloadError("no matching track found on YouTube")
+    e = entries[0]
+    return e.get("webpage_url") or f"https://www.youtube.com/watch?v={e['id']}"
