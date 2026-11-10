@@ -62,6 +62,16 @@ def download_video_with_persian_subtitle(url: str) -> tuple[str, str]:
         "format": f"bestvideo[height<={MAX_VIDEO_HEIGHT}]+bestaudio/best[height<={MAX_VIDEO_HEIGHT}]",
         "merge_output_format": "mp4",
         "outtmpl": out_template,
+        # YouTube's android_vr player has recently returned truncated media
+        # responses (often followed by HTTP 503). Keep the normal web clients
+        # and explicitly exclude that unstable client.
+        "extractor_args": {
+            "youtube": {"player_client": ["default", "web_embedded", "-android_vr"]}
+        },
+        # Retry temporary CDN/network failures without retrying forever.
+        "retries": 10,
+        "fragment_retries": 10,
+        "extractor_retries": 5,
         # Prefer a creator-provided Persian track, then YouTube's Persian
         # auto-caption/auto-translation track when one is available.
         "writesubtitles": True,
