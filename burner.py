@@ -11,7 +11,7 @@ def mux_subtitles(video_path: str, srt_path: str, output_path: str):
         "-c", "copy",
         "-c:s", "srt",
         "-metadata:s:s:0", "language=fas",
-        "-disposition:s:s:0", "default",
+        "-disposition:s:0", "default",
         output_path,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
